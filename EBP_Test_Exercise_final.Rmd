@@ -1,0 +1,350 @@
+---
+title: "Elder_SDS_Test_Exercise"
+author: "SS"
+date: "16/01/2021"
+output: html_document
+---
+
+Cleaning work space, env, memory etc.
+
+```{r}
+# .rs.restartR() # restart R
+
+rm(list = ls()) # wipe the environment
+
+rm(list=ls(all=TRUE)) # clean memory
+
+options(java.parameters = "-Xmx8000m") #  allocating additional memory to java
+
+```
+
+
+Load libraries required in this analysis
+```{r}
+
+# Data exploration
+library(DataExplorer)
+# read xlsx file
+library(xlsx)
+# filter and clean the data
+library(dplyr)
+# Automated Feature Selection using Step AIC (Akaike Information Criteria)
+library(MASS)
+# load libraries for SMOTE
+library(DMwR)
+library(MASS)
+library(UBL)
+# loading and initialising H2o library
+library(h2o)
+h2o.init()
+
+```
+
+
+Loading excel data file 
+
+```{r}
+# # read xlsx file
+# library(xlsx)
+
+full_dataset <- read.xlsx2("C:/Users/ss499173/OneDrive - GSK/Documents/Projects_OPA/Learning_Development/ebp_exercise-master/data.xlsx", 5)
+full_dataset <- full_dataset[-c(1, 3)]
+
+```
+
+Data exploration
+
+```{r}
+# Data exploration
+# library(DataExplorer)
+
+plot_intro(full_dataset) # visualize the data set
+
+plot_missing(full_dataset) # check for missing values
+
+plot_bar(full_dataset) # top level trends in the data
+
+```
+
+Feature engineering/variable selection is not done in this work as the data set is very limited with jut 571 samples and 12 columns (i.e., 11 features + 1 Y variable). Moreover, this exercise uses Gradient Boosting Models which are good in identifying the high impact features. Overall, the thought process is to build the model on the whole data set, and identify the most importance features once the model is developed.
+
+
+Checking for class imbalance as it impacts the prediction accuracy of the classification models. Since there is class imbalance in the dataset (Bottom (129), Middle (376) & Top (66)), SMOTE technique is applied to generate artificial samples of underrepresenting class via a process called oversampling. 
+
+```{r}
+# SMOTE to correct for the class imbalance
+
+table( full_dataset$performance_group) #check cat distribution of target variable 
+
+# load libraries for SMOTE
+# library(DMwR)
+# library(MASS)
+# library(UBL)
+
+# Perform SMOTE
+set.seed(1234)
+newData2 <- SMOTE(performance_group ~ ., full_dataset, perc.over = 350, perc.under= 210) # perc.over = 350, perc.under= 210
+
+table(newData2$performance_group)
+
+set.seed(9560)
+newData <- SMOTE(performance_group ~ ., newData2, k = 5, perc.over = 500, perc.under= 250) 
+
+#newData <- SmoteClassif(One80_Overall_Score_Group ~ ., full_dataset, C.perc = "balance")
+
+table(newData$performance_group)
+
+# inspect the dataset strucutre 
+str(newData)
+```
+
+Classfication modesl GLM and GBM were built using H2o library. 
+
+```{r}
+# Based on the features selected in previous section, GLM and GBM models are built as below.
+
+# loading and initialising H2o library
+# library(h2o)
+# h2o.init()
+
+# data as h2o data frame
+
+xdata <- newData
+
+xdata <- as.h2o(xdata) 
+
+# creating train and valid set
+xdata.split <- h2o.splitFrame(data = xdata,ratios = 0.70, seed = 1245)
+train <- xdata.split[[1]]
+valid <- xdata.split[[2]]
+
+
+# define x & y; x selected based on the features identified in glm and stepAIC
+
+x <- c( "yrs_employed_category", "manager_hire", "test_score_category", "group_size_category","concern_flag", "mobile_flag", "customers_category", "high_hours_flag" , "transfers", "reduced_schedule", "city")
+
+y <- "performance_group"
+
+## building GLM model
+
+td_glm = h2o.glm( x = x, y = y, family = "ordinal",  training_frame = train, balance_classes = TRUE, seed = 1234, nfolds = 5) 
+
+
+# pulling out model performance e.g, accuracy, R2, confusion matrix etc for training and cross-validation
+print(td_glm)
+
+# predictions using the trained GBM model
+perf_glm <- h2o.performance(td_glm, valid)
+
+# pulling out model performance for the test set
+print(perf_glm)
+
+
+## building GBM model
+
+td_gbm <- h2o.gbm( y = y, x = x, training_frame = train,  nfolds=5,  seed = 1234, stopping_rounds=1, stopping_tolerance=0, stopping_metric="logloss")
+
+# pulling out model performance e.g, accuracy, R2, confusion matrix etc for training and cross-validation
+print(td_gbm)
+
+# predictions using the trained GBM model
+perf_gbm <- h2o.performance(td_gbm, valid)
+
+# pulling out model performance for the test set
+print(perf_gbm)
+
+# var importance plot
+h2o.varimp_plot(td_gbm)
+
+```
+
+
+Buildig h2o models in autoML mode where the best performing model is automatically selected by the algorithm. 
+```{r}
+# create automodels and select the best model
+seed = 1234
+models_h2o <- h2o.automl( x = x, y = y, training_frame  = train, seed = 1234,  max_models = 10, max_runtime_secs  = 60, exclude_algos = "StackedEnsemble")
+
+### leaderboard (ranking of top 5 models)
+lb <- models_h2o@leaderboard
+print(lb)
+print(lb, n = nrow(lb))
+
+# choosng the best scoring model
+automl_leader <- models_h2o@leader
+
+# pulling out model performance e.g, accuracy, R2, confusion matrix etc for training and cross-validation
+print(automl_leader)
+
+# predictions using the trained autoML model
+perf_automl <- h2o.performance(automl_leader, valid)
+
+# pulling out model performance for the test set
+print(perf_automl)
+
+```
+
+
+Since the autoML model in showing slightly better performance than GBM model built in manual mode, the recommended autoML model is chosen for the classifcation & prediction purpose. Predictions are then interpreted using Lime package whihc essentially generates the vairbale importqnce plot for every prediction. In this work, top five variables utilised in making a right prediction are pulled out. Finally, for the prediction set, the number of occurance of every variable is counted, and the variables appearing the highest number of times are reported as the highest influencing variables.
+
+
+```{r}
+
+# Based on the results, we choose automl_leader model as our final model. 
+# get predictions using the selected model with all of the data
+h20_pred <- h2o.predict(automl_leader, valid)
+
+# interpreting model results using lime package to get further insights into the model
+
+library(tibble)
+
+test_performance <- valid%>%
+  tibble::as_tibble() %>%
+  dplyr::select(performance_group) %>%
+  tibble::add_column(prediction = as.vector(h20_pred$predict)) %>%
+  mutate(correct = ifelse(performance_group == prediction, "correct", "wrong")) %>% 
+  mutate_if(is.character, as.factor)
+
+head(test_performance)
+
+train_df = as.data.frame(valid)
+
+train_2 = train_df %>%
+  as.data.frame() %>% 
+  mutate(sample_id = rownames(train_df ))
+
+test_h2o_df = as.data.frame(valid)
+
+test_h2o_2 = test_h2o_df %>%
+  as.data.frame() %>% 
+  mutate(sample_id = rownames(test_h2o_df ))
+
+test_correct <- test_performance %>% 
+  mutate(sample_id = rownames(test_performance)) %>% 
+  filter(correct == 'correct') %>%
+  inner_join(test_h2o_2) %>% 
+  dplyr::select(-c(prediction, correct, sample_id))
+
+test_wrong <- test_performance %>% 
+  mutate(sample_id = rownames(test_performance)) %>% 
+  filter(correct == 'wrong') %>%
+  inner_join(test_h2o_2) %>% 
+  dplyr::select(-c(prediction, correct, sample_id))
+
+library(lime)
+
+# Setup lime::model_type() function for h2o
+model_type.H2OMultiModel <- function(x, ...) {
+  return("classification")
+}
+
+# Setup lime::predict_model() function for h2o
+predict_model.H2OMultiModel <- function(x, newdata, type, ...) {
+  pred <- h2o.predict(x, as.h2o(newdata))
+  # return probs
+  return(as.data.frame(pred[,-1]))
+}
+
+
+predict_model(x = automl_leader, newdata = as.data.frame(valid[,-1]), type = 'raw') %>%
+  tibble::as_tibble()
+
+
+explainer <- lime::lime(
+  as.data.frame(valid[,-1]), 
+  model          = automl_leader, 
+  bin_continuous = FALSE)
+
+# TEST CORRECT: Define 3 subsets of data for bottom middle and top performance, when the prediction was correct (i.e., TEST CORRECT) 
+
+# TEST CORRECT: Top
+test_correct_top <- filter(test_correct, performance_group %in% c( "Top"))
+
+explanation_corr_top <- explain(
+  test_correct_top[1:nrow(test_correct_top), -1],
+  explainer = explainer,
+  n_labels = 1,
+  n_features = 5,
+  kernel_width = 0.5)
+
+# subset to extract the instances with positive feature weight
+explanation_corr_top_f_wt <- subset(explanation_corr_top, feature_weight >0)
+
+# library(readxl)
+# library(reshape2)
+# library(rpivotTable)
+# library(tidyverse)
+
+# count & arrange in descending order, the number of item a given feature in feature_desc variable appeared in the data frame
+explanation_corr_top_f_wt_desc <- explanation_corr_top_f_wt %>% 
+          group_by(feature_desc) %>% 
+          summarize(n_unique = length((feature_desc))) %>% 
+          arrange(desc(n_unique))
+
+print(explanation_corr_top_f_wt_desc)
+
+# TEST CORRECT: Middle
+test_correct_middle <- filter(test_correct, performance_group %in% c( "Middle"))
+
+explanation_corr_middle <- explain(
+  test_correct_middle[1:nrow(test_correct_middle), -1],
+  explainer = explainer,
+  n_labels = 1,
+  n_features = 5,
+  kernel_width = 0.5)
+# subset to extract the instances with positive feature weight
+
+explanation_corr_middle_f_wt <- subset(explanation_corr_middle, feature_weight >0)
+
+# count & arrange in descending order, the number of item a given feature in feature_desc variable appeared in the data frame
+explanation_corr_middle_f_wt_desc <- explanation_corr_middle_f_wt %>% 
+          group_by(feature_desc) %>% 
+          summarize(n_unique = length((feature_desc))) %>% 
+          arrange(desc(n_unique))
+
+print(explanation_corr_middle_f_wt_desc)
+
+# TEST CORRECT: Bottom
+test_correct_bottom <- filter(test_correct, performance_group %in% c( "Bottom"))
+
+explanation_corr_bottom <- explain(
+  test_correct_bottom[1:nrow(test_correct_bottom), -1],
+  explainer = explainer,
+  n_labels = 1,
+  n_features = 5,
+  kernel_width = 0.5)
+
+# subset to extract the instances with positive feature weight
+explanation_corr_bottom_f_wt <- subset(explanation_corr_bottom, feature_weight >0)
+
+# count & arrange in descending order, the number of item a given feature in feature_desc variable appeared in the data frame
+explanation_corr_bottom_f_wt_desc <- explanation_corr_bottom_f_wt %>% 
+          group_by(feature_desc) %>% 
+          summarize(n_unique = length((feature_desc))) %>% 
+          arrange(desc(n_unique))
+
+print(explanation_corr_bottom_f_wt_desc)
+
+```
+
+Results: Key attributes of high and low performing managers are compared as below.
+
+Top performing managers:
+
+1. Are likely to have no concern flags.
+2. Are likely to work longer hours.
+3. Are likely to have no transfer requests from their team members.
+4. Are likely to have bigger group size (>13).
+5. Are likely to have < or = 4 years of employment.
+6. Are likely to score high on the test score category.
+
+In contrast, the low (bottom) performing managers:
+
+1. Are not likely to work longer hours.
+2. Are likely to have > than or = 5 years of employment.
+3. Are likely to have concern flags.
+4. Are likely to score low on the test score category.
+5. Are likely to have smaller group size (=< 9).
+6. Some of them are likely to have received transfer requests from their team members.
+
+
